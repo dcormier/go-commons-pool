@@ -1,6 +1,7 @@
 package concurrent
 
 import (
+	"context"
 	"math"
 	"strconv"
 	"sync"
@@ -19,26 +20,6 @@ type TimeoutCond struct {
 func NewTimeoutCond(l sync.Locker) *TimeoutCond {
 	cond := TimeoutCond{L: l, signal: make(chan int, 0)}
 	return &cond
-}
-
-// WaitWithTimeout wait for signal return remain wait time, and is interrupted
-func (cond *TimeoutCond) WaitWithTimeout(timeout time.Duration) (time.Duration, bool) {
-	cond.addWaiter()
-	ch := cond.signal
-	//wait should unlock mutex,  if not will cause deadlock
-	cond.L.Unlock()
-	defer cond.removeWaiter()
-	defer cond.L.Lock()
-
-	begin := time.Now().UnixNano()
-	select {
-	case _, ok := <-ch:
-		end := time.Now().UnixNano()
-		remainTimeout := timeout - time.Duration(end-begin)
-		return remainTimeout, !ok
-	case <-time.After(timeout):
-		return 0, false
-	}
 }
 
 func (cond *TimeoutCond) addWaiter() {
@@ -60,6 +41,36 @@ func (cond *TimeoutCond) removeWaiter() {
 // HasWaiters queries whether any goroutine are waiting on this condition
 func (cond *TimeoutCond) HasWaiters() bool {
 	return atomic.LoadUint64(&cond.hasWaiters) > 0
+}
+
+// WaitWithContext waits for a signal, or for the context do be done. Returns true if signaled.
+func (cond *TimeoutCond) WaitWithContext(ctx context.Context) bool {
+	cond.addWaiter()
+	ch := cond.signal
+	//wait should unlock mutex,  if not will cause deadlock
+	cond.L.Unlock()
+	defer cond.removeWaiter()
+	defer cond.L.Lock()
+
+	select {
+	case _, ok := <-ch:
+		return !ok
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// WaitWithTimeout wait for signal return remain wait time, and is interrupted
+func (cond *TimeoutCond) WaitWithTimeout(timeout time.Duration) (time.Duration, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	begin := time.Now()
+	interrupted := cond.WaitWithContext(ctx)
+	elapsed := time.Since(begin)
+	remainingTimeout := timeout - elapsed
+
+	return remainingTimeout, interrupted
 }
 
 // Wait for signal return waiting is interrupted
